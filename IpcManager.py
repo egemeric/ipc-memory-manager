@@ -16,106 +16,144 @@ class SharedMemorySlots(Enum):
         return(cls.QUEUE, cls.REALTIME, cls.UNUSED)
 
 
-class Driver():
-    def activate(self):
-        pass
-
-    def deactivate(self):
-        pass
-
-
-class MemSlotDriver(Driver):
-    MaxSlots = 4
+class MemoryDriver():
     _Manager = None
     SLOTS = {}
+    _master_mem = None
 
-    def __init__(self,is_master=False):
-        self.__boot(is_master)
-
-    def __boot(self,is_master):
-        self.__master_mem = MasterMemSlot()
-        self._Manager = SharedMemoryManager(is_master)
-        if self._Manager.InitializationNeeded:
-            self._Manager.allocate(self.__master_mem)
-            for address in SharedMemorySlots.get():
-                self.SLOTS[address.value] = MemSlot(address.value, 1024)
-                self._Manager.allocate(self.SLOTS[address.value])
-                self._activate(self.SLOTS[address.value])
-        else:
-            self._set_active_slots()
+    def _update_self(self):
+        raw_slots = self._master_mem.read_data()
+        for is_active, address, size, modified_times, dynamic_size in raw_slots:
+            slot = self.SLOTS[address]
+            slot.is_active = is_active
+            slot.size = size
+            slot.modified_times = modified_times
+            slot.dynamic_size = dynamic_size
 
     def _set_active_slots(self):
-        addresses = []
-        buffer = self._Manager.get_buffer(0)
-        raw_slots = self.__master_mem.read_data(buffer=buffer)
-        for is_active, address, size, modified_times in raw_slots:
+        slots = []
+        raw_slots = self._master_mem.read_data()
+        for is_active, address, size, modified_times, dynamic_size in raw_slots:
             a_slot = MemSlot(address, size)
             a_slot.is_active = is_active
             a_slot.modified_times = modified_times
+            a_slot.dynamic_size = dynamic_size
             self.SLOTS[a_slot.address] = a_slot
-            addresses.append(a_slot.address)
-        self.__mem_mangr_update(adresses=addresses)
-        print(self.SLOTS)
+            slots.append(a_slot)
+        self._mem_mangr_update(slots)
 
-    def __mem_mangr_update(self, adresses):
-        self._Manager.update_self(addresses=adresses)
+    def _mem_mangr_update(self, slots):
+        for slot in slots:
+            self._Manager.update_block(address=slot.address)
+            slot.set_buffer(self._Manager.get_buffer(slot.address))
         pass
 
     def _activate(self, slot):
         slot.is_active = True
-        activation_pack = struct.pack(
-            "?IIL", slot.is_active, slot.address, slot.size, slot.modified_times)
+        # write other slot informations to master slot
         buffer = self._Manager.get_buffer(0)
-        self.__master_mem.write_data(slot, activation_pack, buffer)
+        self._master_mem.write_data(slot)
+        slot.set_buffer(self._Manager.get_buffer(slot.address))
 
-    def deactivate(self, slot):
-        slot.is_active = False
-        return struct.pack("?IIL", slot.is_active, slot.address, slot.size, slot.modified_times)
+    def write_data(self):
+        pass
 
-    def pack_data(self):
-        data = struct.pack("?IIL" + str(len(self.data)) + 's', self.is_active,
-                           self.slot, self.size, self.modified_times, bytes(self.data))
-        return data
-
-    def unpack_data(self, data):
-        data = struct.unpack(
-            "?IIL" + str(len(data)-self.HEAD_SIZE + 's', data))
-        return data
+    def read_data(self):
+        pass
 
 
-class MasterMemSlot:
+class SharedMemoryDriver(MemoryDriver):
+    DEFAULT_SLOT_SIZE = 1024
+
+    def __init__(self, is_master=False):
+        self.__boot(is_master)
+
+    def __boot(self, is_master):
+        self._master_mem = _MasterMemSlot()
+        self._Manager = SharedMemoryManager(is_master)
+        if self._Manager.InitializationNeeded:
+            self._Manager.allocate(self._master_mem)
+            self._master_mem.set_buffer(self._Manager.get_buffer(0))
+            for address in SharedMemorySlots.get():
+                self.SLOTS[address.value] = MemSlot(
+                    address.value, SharedMemoryDriver.DEFAULT_SLOT_SIZE)
+                self._Manager.allocate(self.SLOTS[address.value])
+                self._activate(self.SLOTS[address.value])
+        else:
+            self._master_mem.set_buffer(self._Manager.get_buffer(0))
+            self._set_active_slots()
+
+    def write_data(self, address, data):
+        self.SLOTS[address].write_data(data)
+        self._master_mem.write_data(self.SLOTS[address])  # inform master
+        self._update_self()
+
+    def read_data(self, address):
+        self._update_self()
+        data = self.SLOTS[address].read_data()
+        return data[5]
+
+    def get_slot_modified_times(self, address):
+        self._update_self()
+        return self.SLOTS[address].modified_times
+
+
+class _MasterMemSlot:
     modified_times = 0
     is_active = False
     Data = None
-    Buffer_len = struct.calcsize("?IIL")
+    Buffer_len = struct.calcsize("?IILL")
+    _buffer = None
+    dynamic_size = 0
 
     def __init__(self):
         self.address = 0
         self.size = self.Buffer_len * 4  # 4 slots are available
 
-    def write_data(self, mem_slot, data, buffer):
+    def write_data(self, mem_slot):
         start_addres = mem_slot.address * self.Buffer_len
         end_address = start_addres + self.Buffer_len
-        buffer[start_addres:end_address] = data
+        self._buffer[start_addres:end_address] = struct.pack(
+            "?IILL", mem_slot.is_active, mem_slot.address, mem_slot.size, mem_slot.modified_times, mem_slot.dynamic_size)
 
-    def read_data(self, buffer):
+    def read_data(self):
         result = []
         for addres in range(self.Buffer_len, self.size, self.Buffer_len):
             low = addres
             high = low + self.Buffer_len
-            slot = struct.unpack("?IIL", buffer[low:high])
+            slot = struct.unpack("?IILL", self._buffer[low:high])
             result.append(slot)
         return tuple(result)
 
+    def set_buffer(self, buff):
+        self._buffer = buff
 
-class MemSlot():
+    def get_buffer(self):
+        return self._buffer
+
+
+class MemSlot(_MasterMemSlot):
     modified_times = 0
     is_active = False
     Data = None
+    encoding = 'utf-8'
 
     def __init__(self, slot_address, size):
         self.address = slot_address
         self.size = size
+
+    def write_data(self, string_data):
+        self.modified_times += 1
+        self.dynamic_size = self.Buffer_len + len(string_data)
+        packed_data = struct.pack("?IILL" + str(len(string_data)) + 's', self.is_active, self.address,
+                                  self.size, self.modified_times, self.dynamic_size, bytes(string_data, self.encoding))
+        self._buffer[:self.dynamic_size] = packed_data
+        return bytes(self._buffer[:self.Buffer_len])  # return header info
+
+    def read_data(self):
+        data = struct.unpack("?IILL" + str(self.dynamic_size -
+                             self.Buffer_len) + 's', self._buffer[:self.dynamic_size])
+        return(data)
 
 
 class SharedMemoryManager:
@@ -124,7 +162,7 @@ class SharedMemoryManager:
     entry_loc = None
     _BLOCKS = {}
 
-    def __init__(self,is_master=False):
+    def __init__(self, is_master=False):
         self.is_master = is_master
         block_name = self.name_prefix+str(0)
         try:
@@ -135,9 +173,10 @@ class SharedMemoryManager:
 
     def __del__(self):
         if self.is_master:
+            print("Deallocate")
             for address in self._BLOCKS.keys():
                 self._BLOCKS[address].close()
-                self._BLOCKS[address].unlink()
+               
 
     def allocate(self, memslot):
         block_name = self.name_prefix+str(memslot.address)
@@ -153,14 +192,13 @@ class SharedMemoryManager:
     def get_buffer(self, address):
         return self._BLOCKS[address].buf
 
-    def update_self(self, addresses):
-        for address in addresses:
-            block_name = self.name_prefix+str(address)
-            self._BLOCKS[address] = shared_memory.SharedMemory(block_name)
+    def update_block(self, address):
+        block_name = self.name_prefix+str(address)
+        self._BLOCKS[address] = shared_memory.SharedMemory(block_name)
 
 
 if __name__ == "__main__":
-    driver = MemSlotDriver(is_master=True)
+    driver = SharedMemoryDriver(is_master=True)
     while 1:
         sleep(1)
         pass
