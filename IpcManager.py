@@ -1,7 +1,7 @@
 from curses.ascii import BEL
 from enum import Enum
 import struct
-from multiprocessing import shared_memory
+from multiprocessing import shared_memory, resource_tracker
 from time import sleep
 
 
@@ -44,7 +44,7 @@ class MemoryDriver():
 
     def _mem_mangr_update(self, slots):
         for slot in slots:
-            self._Manager.update_block(address=slot.address)
+            self._Manager.update_block(slot=slot)
             slot.set_buffer(self._Manager.get_buffer(slot.address))
         pass
 
@@ -67,7 +67,7 @@ class SharedMemoryDriver(MemoryDriver):
 
     def __init__(self, is_master=False):
         self.__boot(is_master)
-
+    
     def __boot(self, is_master):
         self._master_mem = _MasterMemSlot()
         self._Manager = SharedMemoryManager(is_master)
@@ -151,8 +151,11 @@ class MemSlot(_MasterMemSlot):
         return bytes(self._buffer[:self.Buffer_len])  # return header info
 
     def read_data(self):
-        data = struct.unpack("?IILL" + str(self.dynamic_size -
-                             self.Buffer_len) + 's', self._buffer[:self.dynamic_size])
+        try:
+            data = struct.unpack("?IILL" + str(self.dynamic_size -
+                                               self.Buffer_len) + 's', self._buffer[:self.dynamic_size])
+        except struct.error:
+            return(self.is_active, self.address, self.size, self.modified_times, self.dynamic_size, b'')
         return(data)
 
 
@@ -167,6 +170,8 @@ class SharedMemoryManager:
         block_name = self.name_prefix+str(0)
         try:
             self._BLOCKS[0] = shared_memory.SharedMemory(block_name)
+            resource_tracker.unregister("/"+block_name, 'shared_memory')
+
         except FileNotFoundError:
             self.InitializationNeeded = True
             pass
@@ -174,9 +179,9 @@ class SharedMemoryManager:
     def __del__(self):
         if self.is_master:
             print("Deallocate")
+            self._BLOCKS[0].close()
             for address in self._BLOCKS.keys():
                 self._BLOCKS[address].close()
-               
 
     def allocate(self, memslot):
         block_name = self.name_prefix+str(memslot.address)
@@ -184,17 +189,28 @@ class SharedMemoryManager:
             self._BLOCKS[memslot.address] = shared_memory.SharedMemory(
                 block_name)
             self.InitializationNeeded = False
+            resource_tracker.unregister("/"+block_name, 'shared_memory')
+
         except FileNotFoundError:
             print("allocate:", block_name)
             self._BLOCKS[memslot.address] = shared_memory.SharedMemory(
                 block_name, size=memslot.size, create=True)
+            resource_tracker.unregister("/"+block_name, 'shared_memory')
 
     def get_buffer(self, address):
         return self._BLOCKS[address].buf
 
-    def update_block(self, address):
-        block_name = self.name_prefix+str(address)
-        self._BLOCKS[address] = shared_memory.SharedMemory(block_name)
+    def update_block(self, slot):
+        block_name = self.name_prefix+str(slot.address)
+        try:
+            self._BLOCKS[slot.address] = shared_memory.SharedMemory(block_name)
+            resource_tracker.unregister("/"+block_name, 'shared_memory')
+
+        except FileNotFoundError:
+            self._BLOCKS[slot.address] = shared_memory.SharedMemory(
+                block_name, size=slot.size, create=True)
+            resource_tracker.unregister("/"+block_name, 'shared_memory')
+
 
 
 if __name__ == "__main__":

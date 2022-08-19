@@ -11,16 +11,13 @@ if __name__ == "__main__":
     changed_times = None
     check = None
     while 1:
-        check = mng.get_slot_modified_times(IpcManager.SharedMemorySlots.REALTIME.value)
+        check = mng.get_slot_modified_times(
+            IpcManager.SharedMemorySlots.REALTIME.value)
         if changed_times != check:
             changed_times = check
-            try:
-                data = mng.read_data(IpcManager.SharedMemorySlots.REALTIME.value)
-                print("Slot's data is changed.")
-                print(data)
-                print("----------------")
-            except Exception as e:
-                pass
-           
+            data = mng.read_data(IpcManager.SharedMemorySlots.REALTIME.value)
+            print("Slot's data is changed.")
+            print(data)
+            print("----------------")
+
         sleep(0.1)
-        
