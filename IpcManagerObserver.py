@@ -1,3 +1,4 @@
+import json
 from multiprocessing.shared_memory import SharedMemory
 from IpcManager import SharedMemorySlots, SharedMemoryDriver
 from threading import Thread
@@ -31,6 +32,7 @@ class MemorySubject(Subject, Thread):
 
     def _memory_checker_job(self):
         while(self._run):
+            self.MemoryDriver.update_self()
             live = self.MemoryDriver.get_slot_modified_times(
                 self.MemoryAddress)
             if live != self._tracker_val:
@@ -70,14 +72,7 @@ class MemoryObserver(Observer):
     def update(self, **kwargs):
         data = kwargs['data']
         print("!--Data has changed--!")
-        print(data)
+        print(json.loads(data))
         pass
 
 
-if __name__ == '__main__':
-    memoryDriver = SharedMemoryDriver(is_master=False)
-    subj = MemorySubject(SharedMemorySlots.REALTIME.value,
-                         memory_driver=memoryDriver)
-    observer = MemoryObserver()
-    subj.attach(observer=observer)
-    subj.run()

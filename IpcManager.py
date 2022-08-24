@@ -15,6 +15,9 @@ class SharedMemorySlots(Enum):
     def get(cls):
         return(cls.QUEUE, cls.REALTIME, cls.UNUSED)
 
+class BufferOverflow(Exception):
+    pass
+
 
 class MemoryDriver():
     _Manager = None
@@ -30,7 +33,7 @@ class MemoryDriver():
             slot.modified_times = modified_times
             slot.dynamic_size = dynamic_size
 
-    def _set_active_slots(self):
+    def update_self(self):
         slots = []
         raw_slots = self._master_mem.read_data()
         for is_active, address, size, modified_times, dynamic_size in raw_slots:
@@ -49,9 +52,10 @@ class MemoryDriver():
         pass
 
     def _activate(self, slot):
+        self.SLOTS[slot.address]=slot
         slot.is_active = True
         # write other slot informations to master slot
-        buffer = self._Manager.get_buffer(0)
+        #buffer = self._Manager.get_buffer(0)
         self._master_mem.write_data(slot)
         slot.set_buffer(self._Manager.get_buffer(slot.address))
 
@@ -75,18 +79,25 @@ class SharedMemoryDriver(MemoryDriver):
             self._Manager.allocate(self._master_mem)
             self._master_mem.set_buffer(self._Manager.get_buffer(0))
             for address in SharedMemorySlots.get():
-                self.SLOTS[address.value] = MemSlot(
-                    address.value, SharedMemoryDriver.DEFAULT_SLOT_SIZE)
-                self._Manager.allocate(self.SLOTS[address.value])
-                self._activate(self.SLOTS[address.value])
+                slot = MemSlot(address.value, SharedMemoryDriver.DEFAULT_SLOT_SIZE)
+                self._Manager.allocate(slot)
+                self._activate(slot)
         else:
             self._master_mem.set_buffer(self._Manager.get_buffer(0))
-            self._set_active_slots()
+            self.update_self()
 
     def write_data(self, address, data):
-        self.SLOTS[address].write_data(data)
-        self._master_mem.write_data(self.SLOTS[address])  # inform master
-        self._update_self()
+        try:
+            data = bytes(data, 'utf-8')
+            slot=self.SLOTS[address]
+            self.SLOTS[address].write_data(data)
+            self._master_mem.write_data(self.SLOTS[address])  # inform master
+            self._update_self()
+        except BufferOverflow:
+            print("Buffer Overflow")
+            slot=self._Manager.extend_size(slot=slot,size=len(data)+slot.Buffer_len)
+            self._activate(slot=slot)
+            pass
 
     def read_data(self, address):
         self._update_self()
@@ -142,11 +153,14 @@ class MemSlot(_MasterMemSlot):
         self.address = slot_address
         self.size = size
 
-    def write_data(self, string_data):
+    def write_data(self, bin_data):
         self.modified_times += 1
-        self.dynamic_size = self.Buffer_len + len(string_data)
-        packed_data = struct.pack("?IILL" + str(len(string_data)) + 's', self.is_active, self.address,
-                                  self.size, self.modified_times, self.dynamic_size, bytes(string_data, self.encoding))
+        self.dynamic_size = self.Buffer_len + len(bin_data)
+        print(self.size,self.dynamic_size,len(bin_data)+ self.Buffer_len)
+        if self.size < self.dynamic_size:
+            raise BufferOverflow
+        packed_data = struct.pack("?IILL" + str(len(bin_data)) + 's', self.is_active, self.address,
+                                  self.size, self.modified_times, self.dynamic_size, bin_data)
         self._buffer[:self.dynamic_size] = packed_data
         return bytes(self._buffer[:self.Buffer_len])  # return header info
 
@@ -183,6 +197,7 @@ class SharedMemoryManager:
             for address in self._BLOCKS.keys():
                 self._BLOCKS[address].close()
 
+
     def allocate(self, memslot):
         block_name = self.name_prefix+str(memslot.address)
         try:
@@ -210,6 +225,21 @@ class SharedMemoryManager:
             self._BLOCKS[slot.address] = shared_memory.SharedMemory(
                 block_name, size=slot.size, create=True)
             resource_tracker.unregister("/"+block_name, 'shared_memory')
+    
+    def extend_size(self,slot,size):
+        print("Extend")
+        size += 32
+        block_name = self.name_prefix+str(slot.address)
+        #self._BLOCKS[slot.address].close()
+        self._BLOCKS[slot.address].unlink()
+        block = shared_memory.SharedMemory(block_name, size=size, create=True)
+        resource_tracker.unregister("/"+block_name, 'shared_memory')
+
+        self._BLOCKS[slot.address] = block
+        slot.size = size
+        slot.set_buffer( self._BLOCKS[slot.address].buf)
+        return slot
+
 
 
 
